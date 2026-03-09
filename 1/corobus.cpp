@@ -42,7 +42,7 @@ wakeup_queue_wakeup_first(struct wakeup_queue *queue)
     struct wakeup_entry *entry =
         rlist_first_entry(&queue->coros, struct wakeup_entry, base);
 
-    rlist_del_entry(entry, base);   // 🔥 ЭТОЙ СТРОКИ У ТЕБЯ НЕТ
+    rlist_del_entry(entry, base);  
 
     coro_wakeup(entry->coro);
 }
