@@ -2,52 +2,66 @@
 
 #include <assert.h>
 #include <fcntl.h>
-#include <unistd.h>
+#include <stdlib.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
-#include <vector>
 #include <string>
+#include <vector>
 
 static int last_exit_code = 0;
+
+struct ExecResult {
+    int code;
+    bool should_exit;
+};
+
+static void reap_background_children()
+{
+    while (waitpid(-1, NULL, WNOHANG) > 0) {
+    }
+}
 
 static int run_pipeline(
     const std::vector<const command*>& cmds,
     const command_line *line,
     bool apply_redirect)
 {
-    int n = cmds.size();
+    int n = static_cast<int>(cmds.size());
 
-    std::vector<int> pipes(2 * (n - 1));
+    std::vector<int> pipes;
     std::vector<pid_t> pids;
 
-    for (int i = 0; i < n - 1; i++)
-        pipe(&pipes[2 * i]);
+    if (n > 1) {
+        pipes.resize(2 * (n - 1));
+        for (int i = 0; i < n - 1; i++)
+            pipe(&pipes[2 * i]);
+    }
 
     for (int i = 0; i < n; i++) {
-
         pid_t pid = fork();
 
         if (pid == 0) {
-
             if (i > 0)
                 dup2(pipes[2 * (i - 1)], STDIN_FILENO);
 
             if (i < n - 1)
                 dup2(pipes[2 * i + 1], STDOUT_FILENO);
             else if (apply_redirect) {
-
                 if (line->out_type == OUTPUT_TYPE_FILE_NEW) {
                     int fd = open(line->out_file.c_str(),
                                   O_CREAT | O_WRONLY | O_TRUNC, 0644);
-                    dup2(fd, STDOUT_FILENO);
-                    close(fd);
-                }
-
-                else if (line->out_type == OUTPUT_TYPE_FILE_APPEND) {
+                    if (fd >= 0) {
+                        dup2(fd, STDOUT_FILENO);
+                        close(fd);
+                    }
+                } else if (line->out_type == OUTPUT_TYPE_FILE_APPEND) {
                     int fd = open(line->out_file.c_str(),
                                   O_CREAT | O_WRONLY | O_APPEND, 0644);
-                    dup2(fd, STDOUT_FILENO);
-                    close(fd);
+                    if (fd >= 0) {
+                        dup2(fd, STDOUT_FILENO);
+                        close(fd);
+                    }
                 }
             }
 
@@ -72,7 +86,6 @@ static int run_pipeline(
             argv.push_back(NULL);
 
             execvp(cmd->exe.c_str(), argv.data());
-
             _exit(1);
         }
 
@@ -83,40 +96,41 @@ static int run_pipeline(
         close(fd);
 
     int status = 0;
-
     for (pid_t pid : pids)
         waitpid(pid, &status, 0);
 
-    return WEXITSTATUS(status);
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+
+    return 1;
 }
 
-static void execute_command_line(const command_line *line)
+static ExecResult execute_command_line(const command_line *line)
 {
     assert(line != NULL);
+
+    ExecResult result;
+    result.code = last_exit_code;
+    result.should_exit = false;
 
     std::vector<const command*> pipeline;
 
     int mode = 0; // 0 none, 1 AND, 2 OR
 
     size_t total_cmds = 0;
-    for (const expr &e : line->exprs)
+    for (const expr &e : line->exprs) {
         if (e.type == EXPR_TYPE_COMMAND)
             total_cmds++;
+    }
 
     size_t processed = 0;
 
     for (const expr &e : line->exprs) {
-
         if (e.type == EXPR_TYPE_COMMAND) {
             pipeline.push_back(&(*e.cmd));
-        }
-
-        else if (e.type == EXPR_TYPE_PIPE) {
+        } else if (e.type == EXPR_TYPE_PIPE) {
             continue;
-        }
-
-        else if (e.type == EXPR_TYPE_AND || e.type == EXPR_TYPE_OR) {
-
+        } else if (e.type == EXPR_TYPE_AND || e.type == EXPR_TYPE_OR) {
             bool run = true;
 
             if (mode == 1 && last_exit_code != 0)
@@ -126,59 +140,45 @@ static void execute_command_line(const command_line *line)
                 run = false;
 
             if (run) {
-
                 if (pipeline.size() == 1) {
-
                     const command *cmd = pipeline[0];
 
                     if (cmd->exe == "cd") {
-
                         if (!cmd->args.empty())
                             chdir(cmd->args[0].c_str());
                         else
                             chdir(getenv("HOME"));
 
                         last_exit_code = 0;
-                    }
-
-                    else if (cmd->exe == "exit") {
-
+                    } else if (cmd->exe == "exit") {
                         int code = last_exit_code;
 
                         if (!cmd->args.empty())
                             code = atoi(cmd->args[0].c_str());
 
-                        exit(code);
-                    }
-
-                    else {
-
+                        result.code = code;
+                        result.should_exit = true;
+                        return result;
+                    } else {
                         processed += pipeline.size();
                         bool last = (processed == total_cmds);
 
-                        last_exit_code =
-                            run_pipeline(pipeline, line, last);
+                        last_exit_code = run_pipeline(pipeline, line, last);
                     }
-                }
-
-                else {
-
+                } else {
                     processed += pipeline.size();
                     bool last = (processed == total_cmds);
 
-                    last_exit_code =
-                        run_pipeline(pipeline, line, last);
+                    last_exit_code = run_pipeline(pipeline, line, last);
                 }
             }
 
             pipeline.clear();
-
             mode = (e.type == EXPR_TYPE_AND) ? 1 : 2;
         }
     }
 
     if (!pipeline.empty()) {
-
         bool run = true;
 
         if (mode == 1 && last_exit_code != 0)
@@ -188,40 +188,41 @@ static void execute_command_line(const command_line *line)
             run = false;
 
         if (run) {
-
             if (pipeline.size() == 1) {
-
                 const command *cmd = pipeline[0];
 
                 if (cmd->exe == "cd") {
-
                     if (!cmd->args.empty())
                         chdir(cmd->args[0].c_str());
                     else
                         chdir(getenv("HOME"));
 
                     last_exit_code = 0;
-                    return;
+                    result.code = last_exit_code;
+                    return result;
                 }
 
                 if (cmd->exe == "exit") {
-
                     int code = last_exit_code;
 
                     if (!cmd->args.empty())
                         code = atoi(cmd->args[0].c_str());
 
-                    exit(code);
+                    result.code = code;
+                    result.should_exit = true;
+                    return result;
                 }
             }
 
             processed += pipeline.size();
             bool last = (processed == total_cmds);
 
-            last_exit_code =
-                run_pipeline(pipeline, line, last);
+            last_exit_code = run_pipeline(pipeline, line, last);
         }
     }
+
+    result.code = last_exit_code;
+    return result;
 }
 
 int main()
@@ -234,12 +235,12 @@ int main()
     int rc;
 
     while ((rc = read(STDIN_FILENO, buf, buf_size)) > 0) {
-
         parser_feed(p, buf, rc);
 
         struct command_line *line = NULL;
 
         while (true) {
+            reap_background_children();
 
             enum parser_error err = parser_pop_next(p, &line);
 
@@ -249,12 +250,34 @@ int main()
             if (err != PARSER_ERR_NONE)
                 continue;
 
-            execute_command_line(line);
+            if (line->is_background) {
+                pid_t pid = fork();
+
+                if (pid == 0) {
+                    ExecResult res = execute_command_line(line);
+                    delete line;
+                    _exit(res.code);
+                }
+
+                delete line;
+                line = NULL;
+                last_exit_code = 0;
+                continue;
+            }
+
+            ExecResult res = execute_command_line(line);
 
             delete line;
+            line = NULL;
+
+            if (res.should_exit) {
+                parser_delete(p);
+                return res.code;
+            }
         }
     }
 
+    reap_background_children();
     parser_delete(p);
 
     return last_exit_code;
