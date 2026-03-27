@@ -115,7 +115,7 @@ static ExecResult execute_command_line(const command_line *line)
 
     std::vector<const command*> pipeline;
 
-    int mode = 0; // 0 none, 1 AND, 2 OR
+    int mode = 0;
 
     size_t total_cmds = 0;
     for (const expr &e : line->exprs) {
